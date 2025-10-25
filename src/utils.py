@@ -1,87 +1,105 @@
+# src/utils.py
 from __future__ import annotations
-import re
+
+import io
+import os
+import mimetypes
 from pathlib import Path
-from typing import Tuple
-from datetime import date
+from typing import Tuple, Optional
 
-# Latin, Kiril ve Türkçe-Kazakça karakterleri kapsayan küme
-CYR_LAT = "A-Za-zÀ-ÖØ-öø-ÿĀ-žА-Яа-яІіҰұӘәӨөҚқҒғҮүҺһÇĞİŞçğışÑñ"
-IMAGE_CLASS_SEP = r"[_\-\s]+"  # Dosya adındaki ayırıcılar
+from PIL import Image
+import pytesseract
 
+# PDF için iki aşama: pdfminer (metin katmanı) + pdf2image (OCR fallback)
+from pdfminer.high_level import extract_text as pdf_extract_text
+from pdf2image import convert_from_path
 
-def safe_date_str() -> str:
-    """Bugünün tarihini ISO biçiminde döndürür."""
-    return date.today().isoformat()
-
-
-def split_camel(token: str) -> list[str]:
-    """AhmetYildiz -> ['Ahmet', 'Yildiz']"""
-    return re.findall(
-        r'[A-ZА-ЯІҰӘӨҚҒҮҺ][a-zа-яіұәөқғүһ]+|[A-ZА-ЯІҰӘӨҚҒҮҺ]+(?=[A-ZА-ЯІҰӘӨҚҒҮҺ]|$)|[a-zа-яіұәөқғүһ]+',
-        token,
-    )
+# DOCX
+from docx import Document
 
 
-def parse_meta_from_filename(filename: str) -> tuple[str, str, str]:
+IMAGE_MIME_PREFIXES = ("image/jpeg", "image/png", "image/jpg")
+IMAGE_EXTS = {".jpg", ".jpeg", ".png"}
+PDF_MIME = "application/pdf"
+
+
+def guess_ext_from_mime(mime: Optional[str]) -> str:
+    if not mime:
+        return ""
+    if mime.startswith("image/jpeg"):
+        return ".jpg"
+    if mime.startswith("image/png"):
+        return ".png"
+    if mime == PDF_MIME:
+        return ".pdf"
+    return mimetypes.guess_extension(mime) or ""
+
+
+def normalize_download_filename(name: str, mime_type: Optional[str]) -> str:
     """
-    Dosya adından (AhmetYildiz_10A_Tarih.pdf gibi) ad, soyad ve sınıf tahmin eder.
-    Boş kalırsa '' döner.
+    Drive'dan gelen dosya ismi uzantısız ise MIME tipine göre uzantı ekle.
     """
-    stem = Path(filename).stem
-    parts = [p for p in re.split(IMAGE_CLASS_SEP, stem) if p]
-
-    first_name = ""
-    last_name = ""
-    grade_class = ""
-
-    # Sınıf kalıbı: 10A, 9-B, 11Ә vb.
-    klass_pat = re.compile(
-        r'\b(\d{1,2}[A-Za-zА-Яа-яІіҰұӘәӨөҚқҒғҮүҺһ]?(?:[-–][A-Za-zА-Яа-яІіҰұӘәӨөҚқҒғҮүҺһ])?)\b'
-    )
-    for p in reversed(parts):
-        m = klass_pat.search(p)
-        if m:
-            grade_class = m.group(1)
-            break
-
-    if not parts:
-        return first_name, last_name, grade_class
-
-    # Sınıf parçasını hariç tutarak aday ad parçalarını al
-    name_candidates = [p for p in parts if p != grade_class]
-    if not name_candidates:
-        return first_name, last_name, grade_class
-
-    # CamelCase durumunu kontrol et
-    camel = split_camel(name_candidates[0])
-    if len(camel) >= 2:
-        return camel[0], camel[1], grade_class
-
-    # İkinci parça varsa soyad olarak al
-    if len(name_candidates) >= 2:
-        second = name_candidates[1]
-        if re.fullmatch(fr'[{CYR_LAT}]+', second):
-            first_name, last_name = name_candidates[0], second
-        else:
-            first_name = name_candidates[0]
-    else:
-        first_name = name_candidates[0]
-
-    return first_name, last_name, grade_class
+    p = Path(name)
+    if p.suffix:
+        return name
+    ext = guess_ext_from_mime(mime_type) or ""
+    return p.name + ext
 
 
-def uniquify_path(path: Path) -> Path:
+def read_file_to_text(
+    path: str,
+    ocr_lang: str = "tur+eng",
+    mime_type: Optional[str] = None,
+) -> str:
     """
-    outputs/grading-report_2025-10-25.xlsx mevcutsa
-    -> outputs/grading-report_2025-10-25_1.xlsx, _2.xlsx ... üretir.
+    Çok biçimli metin çıkarıcı:
+      - .txt → düz okuma (utf-8)
+      - .docx → python-docx
+      - .pdf → pdfminer; boşsa pdf2image + OCR
+      - .jpg/.jpeg/.png VEYA mime_type image/* → OCR
     """
-    if not path.exists():
-        return path
-    stem = path.stem
-    suffix = path.suffix
-    i = 1
-    while True:
-        candidate = path.with_name(f"{stem}_{i}{suffix}")
-        if not candidate.exists():
-            return candidate
-        i += 1
+    p = Path(path)
+    ext = p.suffix.lower()
+
+    # TXT
+    if ext == ".txt":
+        try:
+            return p.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            return p.read_text(encoding="latin-1")
+
+    # DOCX
+    if ext == ".docx":
+        doc = Document(str(p))
+        return "\n".join(para.text for para in doc.paragraphs)
+
+    # PDF
+    if ext == ".pdf" or (mime_type == PDF_MIME):
+        # 1) pdfminer ile metin katmanı dene
+        try:
+            text = pdf_extract_text(str(p)) or ""
+        except Exception:
+            text = ""
+        if text.strip():
+            return text
+
+        # 2) OCR fallback: sayfaları görüntüye çevir ve OCR
+        try:
+            pages = convert_from_path(str(p))
+            chunks = []
+            for img in pages:
+                chunks.append(pytesseract.image_to_string(img, lang=ocr_lang))
+            return "\n".join(chunks)
+        except Exception:
+            return ""
+
+    # GÖRÜNTÜ (jpg/png) — uzantı ya da mime ile
+    if ext in IMAGE_EXTS or (mime_type and mime_type.startswith("image/")):
+        img = Image.open(str(p))
+        return pytesseract.image_to_string(img, lang=ocr_lang)
+
+    # Bilinmeyen → dene
+    try:
+        return p.read_text(encoding="utf-8")
+    except Exception:
+        return ""
