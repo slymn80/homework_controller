@@ -13,9 +13,9 @@ from google.oauth2.service_account import Credentials as SA_Credentials
 import io
 
 SCOPES = [
-    "https://www.googleapis.com/auth/drive.readonly",
-    "https://www.googleapis.com/auth/drive.metadata.readonly",
+    "https://www.googleapis.com/auth/drive",
     "https://www.googleapis.com/auth/drive.file",
+    "https://www.googleapis.com/auth/drive.metadata",
 ]
 
 GOOGLE_DOC_MIMES = {
@@ -163,9 +163,16 @@ class DriveClient:
         file = self.service.files().create(
             body=body, media_body=media, fields="id, webViewLink, parents"
         ).execute()
-        # Bazı durumlarda parents set edilemeyebiliyor; garantiye al
+
+        # Dosyanın gerçekten doğru klasörde olduğundan emin ol
         try:
-            self.ensure_in_folder(file["id"], parent_folder_id)
-        except Exception:
-            pass
-        return file  # {'id','webViewLink','parents'}
+            self.service.files().update(
+                fileId=file["id"],
+                addParents=parent_folder_id,
+                fields="id, parents"
+            ).execute()
+        except Exception as e:
+            print(f"⚠️ Folder assignment failed: {e}")
+
+        return file
+
