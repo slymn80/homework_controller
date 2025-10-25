@@ -1,91 +1,126 @@
+# src/utils.py
 from __future__ import annotations
+import os
+import re
 from pathlib import Path
-from typing import Optional, Tuple
-import mimetypes
+from typing import Tuple, Optional
 
-from PIL import Image
-import pytesseract
-from pdfminer.high_level import extract_text as pdf_extract_text
-from pdf2image import convert_from_path
-from docx import Document
+# Basit normalleştirici
+def _norm(s: str) -> str:
+    s = s.replace("_", " ").replace("-", " ").replace(".", " ")
+    s = re.sub(r"\s+", " ", s, flags=re.UNICODE).strip()
+    return s
 
-IMAGE_EXTS = {".jpg", ".jpeg", ".png"}
-PDF_MIME = "application/pdf"
+# Sınıf kodunu ayıkla (10A, 10-A, 7/B, 7B, 8-C, 11К vb.)
+_CLASS_PATTERNS = [
+    r"(\b\d{1,2}\s*[A-Za-zА-Яа-яЁёĞÜŞİÖÇğüşiöçӘәІіҚқҢңҰұҮүҺһ]\b)",   # 10A / 7B / 9Г / 8Ә
+    r"(\b\d{1,2}\s*[-/]\s*[A-Za-zА-Яа-яЁёĞÜŞİÖÇğüşiöçӘәІіҚқҢңҰұҮүҺһ]\b)", # 10-A / 7/B
+    r"(?:sınıfı|sınıf|sinif|grade|class|класс|сынып)\s*[:\-]?\s*(\d{1,2}\s*[A-Za-zА-Яа-яЁёĞÜŞİÖÇğüşiöçӘәІіҚқҢңҰұҮүҺһ])",
+]
 
-def guess_ext_from_mime(mime: Optional[str]) -> str:
-    if not mime:
-        return ""
-    if mime.startswith("image/jpeg"):
-        return ".jpg"
-    if mime.startswith("image/png"):
-        return ".png"
-    if mime == PDF_MIME:
-        return ".pdf"
-    return mimetypes.guess_extension(mime) or ""
+def _find_class(text: str) -> Optional[str]:
+    for pat in _CLASS_PATTERNS:
+        m = re.search(pat, text, flags=re.IGNORECASE | re.UNICODE)
+        if m:
+            return _norm(m.group(1)).replace(" ", "")
+    return None
 
-def normalize_download_filename(name: str, mime_type: Optional[str]) -> str:
-    p = Path(name)
-    if p.suffix:
-        return name
-    ext = guess_ext_from_mime(mime_type) or ""
-    return p.name + ext
+# Dosya adından ad-soyad yakala: "Ahmet_Yılmaz_10A", "Yılmaz Ahmet 10-A",
+# "Ivan Petrov 7Б", "Aty Zhoni 8Ә" vb.
+def _name_from_filename(name_wo_ext: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    s = _norm(name_wo_ext)
 
-def read_file_to_text(path: str, ocr_lang: str = "tur+eng", mime_type: Optional[str] = None) -> str:
-    p = Path(path)
-    ext = p.suffix.lower()
+    # Önce sınıfı çek
+    cls = _find_class(s)
 
-    if ext == ".txt":
-        try:
-            return p.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            return p.read_text(encoding="latin-1")
+    # Sınıf ibaresini atıp kalanını parçala
+    if cls:
+        s_wo_cls = re.sub(r"(?i)(sınıfı|sınıf|sinif|grade|class|класс|сынып)\s*[:\-]?\s*"+re.escape(cls), " ", s)
+        s_wo_cls = s_wo_cls.replace(cls, " ")
+    else:
+        s_wo_cls = s
 
-    if ext == ".docx":
-        doc = Document(str(p))
-        return "\n".join(para.text for para in doc.paragraphs)
+    s_wo_cls = _norm(s_wo_cls)
 
-    if ext == ".pdf" or (mime_type == PDF_MIME):
-        try:
-            text = pdf_extract_text(str(p)) or ""
-        except Exception:
-            text = ""
-        if text.strip():
-            return text
-        try:
-            pages = convert_from_path(str(p))
-            chunks = [pytesseract.image_to_string(img, lang=ocr_lang) for img in pages]
-            return "\n".join(chunks)
-        except Exception:
-            return ""
+    # Harflerden oluşan tokenları al
+    tokens = [t for t in s_wo_cls.split(" ") if re.search(r"[A-Za-zА-Яа-яЁёĞÜŞİÖÇğüşiöçӘәІіҚқҢңҰұҮүҺһ]", t)]
 
-    if ext in IMAGE_EXTS or (mime_type and mime_type.startswith("image/")):
-        img = Image.open(str(p))
-        return pytesseract.image_to_string(img, lang=ocr_lang)
+    # Çok sayıda token olabilir. En güvenlisi ilk iki anlamlı tokenı ad/soyad varsaymak.
+    first = tokens[0] if len(tokens) >= 1 else None
+    last  = tokens[1] if len(tokens) >= 2 else None
 
-    try:
-        return p.read_text(encoding="utf-8")
-    except Exception:
-        return ""
+    # Tek token varsa soyadı boş bırak.
+    return first, last, cls
 
-def parse_student_meta(filename: str) -> Tuple[str, str, str, str]:
+# Metnin içinden yakala (Adı Soyadı, Name Surname, Имя Фамилия, Аты Жөні, Class/Sınıf/Класс/Sынып)
+_TEXT_NAME_PATTERNS = [
+    r"(?:adı\s*soyadı|adi\s*soyadi|ad[\s:]+soyad|isim\s*soyisim)\s*[:\-]?\s*([^\n\r,;]+)",
+    r"(?:name\s*surname|student\s*name)\s*[:\-]?\s*([^\n\r,;]+)",
+    r"(?:имя\s*фамилия)\s*[:\-]?\s*([^\n\r,;]+)",
+    r"(?:аты\s*жөні|аты\s*жони|аты-жөні)\s*[:\-]?\s*([^\n\r,;]+)",
+]
+
+_TEXT_CLASS_PATTERNS = [
+    r"(?:sınıfı|sınıf|sinif|grade|class)\s*[:\-]?\s*([0-9]{1,2}\s*[-/]?\s*[A-Za-z])",
+    r"(?:класс)\s*[:\-]?\s*([0-9]{1,2}\s*[-/]?\s*[А-Яа-яЁё])",
+    r"(?:сынып)\s*[:\-]?\s*([0-9]{1,2}\s*[-/]?\s*[ӘәІіҚқҢңҰұҮүҺһA-Za-z])",
+]
+
+def _split_name_line(line: str) -> Tuple[Optional[str], Optional[str]]:
+    line = _norm(line)
+    # "Ahmet Yılmaz" / "İvan Петров" vb.
+    parts = [p for p in line.split(" ") if p]
+    if len(parts) >= 2:
+        return parts[0], parts[1]
+    return parts[0] if parts else None, None
+
+def _name_class_from_text(text: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    if not text:
+        return None, None, None
+    snippet = _norm(text[:500])  # İlk 500 karakter içinde ara
+
+    # Önce sınıf
+    cls = _find_class(snippet)
+    if not cls:
+        for pat in _TEXT_CLASS_PATTERNS:
+            m = re.search(pat, snippet, flags=re.IGNORECASE | re.UNICODE)
+            if m:
+                cls = _norm(m.group(1)).replace(" ", "")
+                break
+
+    # Sonra ad-soyad
+    first, last = None, None
+    for pat in _TEXT_NAME_PATTERNS:
+        m = re.search(pat, snippet, flags=re.IGNORECASE | re.UNICODE)
+        if m:
+            first, last = _split_name_line(m.group(1))
+            break
+
+    return first, last, cls
+
+def parse_student_meta(filename: str, text: Optional[str] = None) -> Tuple[str, str, str, str]:
     """
-    Heuristik: 'Ad Soyad - Sınıf - ...'  veya  'ad_soyad_sinif_...' gibi
-    Dönüş: (first_name, last_name, class, student_fullname)
+    DÖNÜŞ: (first_name, last_name, class, student_full)
+    - Önce dosya adından dener.
+    - Bulamazsa metnin içinden dener.
+    - Yine bulamazsa boş alanları "" döndürür.
     """
-    stem = Path(filename).stem
-    # dash formatı
-    if " - " in stem:
-        parts = [p.strip() for p in stem.split(" - ") if p.strip()]
-        if len(parts) >= 2:
-            name = parts[0]
-            cls = parts[1]
-            fn, ln = (name.split(" ", 1) + [""])[:2]
-            return fn, ln, cls, name
-    # underscore formatı
-    parts = [p for p in stem.replace("-", "_").split("_") if p]
-    if len(parts) >= 3:
-        fn = parts[0].title()
-        ln = parts[1].title()
-        cls = parts[2]
-        return fn, ln, cls, f"{fn} {ln}"
-    return "", "", "", ""
+    name_wo_ext = Path(filename).stem
+
+    f1, l1, c1 = _name_from_filename(name_wo_ext)
+
+    f2, l2, c2 = (None, None, None)
+    if (not f1 or not l1 or not c1) and text:
+        f2, l2, c2 = _name_class_from_text(text)
+
+    first = f1 or f2 or ""
+    last  = l1 or l2 or ""
+    cls   = (c1 or c2 or "")
+
+    student_full = (first + " " + last).strip()
+    return first, last, cls, student_full
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Mevcut diğer yardımcılarınız burada durabilir; ör. normalize_download_filename, read_file_to_text vs.
+# Bu dosyada onlar zaten vardıysa aynen bırakın.

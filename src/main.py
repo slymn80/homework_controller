@@ -88,7 +88,7 @@ def process_once(limit: int | None = None) -> dict:
             continue
 
         # Öğrenci meta (dosya adından)
-        first_name, last_name, cls, student_full = parse_student_meta(norm_name)
+        first_name, last_name, cls, student_full = parse_student_meta(norm_name, clean_text)
         bd = res.get("breakdown") or {}
 
         processed_rows.append({
