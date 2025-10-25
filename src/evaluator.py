@@ -1,3 +1,4 @@
+# src/evaluator.py
 from __future__ import annotations
 from typing import Dict, Any
 from openai import OpenAI
@@ -76,51 +77,101 @@ You must always return a valid JSON object with the following structure:
 """
 
 def evaluate_text(api_key: str, student_text: str, filename: str) -> Dict[str, Any]:
+    """
+    Yeni OpenAI SDK (v1.x) ile değerlendirme yapar ve
+    RUBRIC'teki JSON şemasını döndürür.
+    """
     client = OpenAI(api_key=api_key)
 
-    system_msg = f"""
-        You are a multilingual, subject-aware academic grader.
-        Detect both the language and the subject of the student's text automatically.
-        Evaluate according to the rubric and provide feedback in the same language.
-        {RUBRIC}
-        """
-    user_msg = f"FILENAME: {filename}\nTEXT:\n{student_text[:12000]}"
+    system_msg = (
+        "You are a multilingual, subject-aware academic grader. "
+        "Detect both the language and the subject of the student's text automatically. "
+        "Evaluate according to the rubric and provide feedback in the same language.\n"
+        f"{RUBRIC}"
+    )
+    # Tek çağrıda çok uzun promptlardan kaçınmak için güvenli kısaltma
+    text_snippet = (student_text or "")[:12000]
+    user_msg = f"FILENAME: {filename}\nTEXT:\n{text_snippet}"
 
     resp = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
             {"role": "system", "content": system_msg},
-            {"role": "user", "content": user_msg}
+            {"role": "user", "content": user_msg},
         ],
         temperature=0.2,
-        max_tokens=600
+        max_tokens=800,
     )
 
-    out_text = resp.choices[0].message.content or ""
+    out_text = (resp.choices[0].message.content or "").strip()
 
-    # JSON'a toleranslı parse
+    # --- JSON'a toleranslı parse ---
     import json, re
-    json_block = None
 
-    # Kod bloğu içindeki JSON'u yakalamaya çalış (```json ... ```)
-    mm = re.search(r"```json\\s*(\\{[\\s\\S]*?\\})\\s*```", out_text, flags=re.IGNORECASE)
-    if mm:
-        try:
-            json_block = json.loads(mm.group(1))
-        except Exception:
-            json_block = None
-
-    # Aksi halde düz metnin sonundaki { ... } bloğunu yakala
-    if not json_block:
-        m = re.search(r"\\{[\\s\\S]*\\}", out_text.strip())
-        if m:
+    def _coerce_result(obj: Dict[str, Any]) -> Dict[str, Any]:
+        # Şemayı eksiksiz hale getir (eski yapıyı BOZMADAN)
+        bd = obj.get("breakdown") or {}
+        result = {
+            "total": obj.get("total"),
+            "breakdown": {
+                "content": bd.get("content"),
+                "structure": bd.get("structure"),
+                "language": bd.get("language"),
+                "originality": bd.get("originality"),
+            },
+            "strengths": obj.get("strengths") or [],
+            "weaknesses": obj.get("weaknesses") or [],
+            "suggestions": obj.get("suggestions") or [],
+            "feedback": obj.get("feedback") or "",
+        }
+        # Tip/limit düzeltmeleri (yumuşak)
+        def _as_int(x):
             try:
-                json_block = json.loads(m.group(0))
+                return int(round(float(x)))
             except Exception:
-                json_block = None
+                return x
+        # toplam ve alt skorları mümkünse int'e çek
+        if isinstance(result["total"], (int, float, str)):
+            result["total"] = _as_int(result["total"])
+        for k in ("content", "structure", "language", "originality"):
+            v = result["breakdown"].get(k)
+            if isinstance(v, (int, float, str)):
+                result["breakdown"][k] = _as_int(v)
+        return result
 
-    if not json_block:
-        # Son çare: düz metni feedback olarak koy
-        json_block = {"total": None, "breakdown": {}, "feedback": out_text.strip()[:1500]}
+    parsed: Dict[str, Any] | None = None
 
-    return json_block
+    # ```json ... ``` bloğu
+    m1 = re.search(r"```json\s*(\{[\s\S]*?\})\s*```", out_text, flags=re.IGNORECASE)
+    if m1:
+        try:
+            parsed = json.loads(m1.group(1))
+        except Exception:
+            parsed = None
+
+    # Son çare: metin içindeki ilk { ... } bloğu
+    if parsed is None:
+        m2 = re.search(r"\{[\s\S]*\}", out_text)
+        if m2:
+            try:
+                parsed = json.loads(m2.group(0))
+            except Exception:
+                parsed = None
+
+    if parsed is None:
+        # JSON veremediyse, feedback'e ham metni koy
+        return {
+            "total": None,
+            "breakdown": {
+                "content": None,
+                "structure": None,
+                "language": None,
+                "originality": None,
+            },
+            "strengths": [],
+            "weaknesses": [],
+            "suggestions": [],
+            "feedback": out_text[:1500],
+        }
+
+    return _coerce_result(parsed)
