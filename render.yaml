@@ -5,10 +5,6 @@ services:
     plan: starter
     autoDeploy: true
     healthCheckPath: /health
-    disk:
-      name: outputs-disk
-      mountPath: /app/outputs
-      sizeGB: 1
     envVars:
       - key: OPENAI_API_KEY
         sync: false
@@ -18,16 +14,52 @@ services:
         value: .txt,.docx,.pdf,.jpg,.jpeg,.png
       - key: OCR_LANG
         value: tur+eng
+      - key: DRIVE_SOURCE_FOLDER_ID
+        sync: false
+      - key: DRIVE_REPORTS_FOLDER_ID
+        sync: false
+      - key: DRIVE_BACKUP_FOLDER_ID
+        sync: false
       - key: LOCAL_OUTPUT_DIR
         value: outputs
       - key: REPORT_PREFIX
         value: grading-report
       - key: MAX_FILES_PER_RUN
         value: "0"
+    disk:
+      name: outputs-disk
+      mountPath: /app/outputs
+      sizeGB: 1
 
-  # 🚀 Cron Job yerine ek bir worker servisi kullan
-  - type: cron
-    name: homework-controller-daily
+  # ✅ CRON yerine Worker tipi kullan (her zaman aktif veya Render Cron Job'la tetiklenebilir)
+  - type: worker
+    name: homework-controller-worker
     env: docker
-    schedule: "0 12 * * *"   # UTC 12 = Asia/Almaty 18:00
-    command: "python -m src.main"
+    plan: starter
+    autoDeploy: true
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: GOOGLE_SERVICE_ACCOUNT_JSON
+        value: creds/service_account.json
+      - key: ALLOWED_EXT
+        value: .txt,.docx,.pdf,.jpg,.jpeg,.png
+      - key: OCR_LANG
+        value: tur+eng
+      - key: DRIVE_SOURCE_FOLDER_ID
+        sync: false
+      - key: DRIVE_REPORTS_FOLDER_ID
+        sync: false
+      - key: DRIVE_BACKUP_FOLDER_ID
+        sync: false
+      - key: LOCAL_OUTPUT_DIR
+        value: outputs
+      - key: REPORT_PREFIX
+        value: grading-report
+      - key: MAX_FILES_PER_RUN
+        value: "0"
+    disk:
+      name: outputs-disk
+      mountPath: /app/outputs
+      sizeGB: 1
+    startCommand: "python -m src.main && sleep 31536000"
