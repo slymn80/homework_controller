@@ -36,7 +36,7 @@ class Settings:
     allowed_ext: List[str] = field(default_factory=lambda: [".txt", ".docx", ".pdf", ".jpg", ".jpeg", ".png"])
 
     # 🔴 HATA SEBEBİ: eksikti → eklendi
-    ocr_lang: str = os.getenv("OCR_LANG", "tur+eng")
+    ocr_lang: str = os.getenv("OCR_LANG", "rus+kaz+tur+eng")
 
     def __post_init__(self):
         # max_files_per_run sayısal değilse 0 yap

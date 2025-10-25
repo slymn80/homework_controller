@@ -12,14 +12,12 @@ from google.oauth2.credentials import Credentials
 from google.oauth2.service_account import Credentials as SA_Credentials
 import io
 
-# ---- OAuth kapsamları (token oluştururken de aynı olmalı)
 SCOPES = [
     "https://www.googleapis.com/auth/drive.readonly",
     "https://www.googleapis.com/auth/drive.metadata.readonly",
     "https://www.googleapis.com/auth/drive.file",
 ]
 
-# Google Workspace "native" dosyaları için export eşlemesi
 GOOGLE_DOC_MIMES = {
     "application/vnd.google-apps.document": (
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -35,12 +33,11 @@ GOOGLE_DOC_MIMES = {
     ),
 }
 
-
 class DriveClient:
     def __init__(self, service):
         self.service = service
 
-    # ───────────── OAuth token kalıcılaştırma (seed→persist) ─────────────
+    # ── OAuth persist ─────────────────────────────────────────────────────────
     @staticmethod
     def _resolve_oauth_paths() -> tuple[Path, Path]:
         seed = os.getenv("GOOGLE_OAUTH_TOKEN_JSON", "/etc/secrets/oauth_token.json")
@@ -74,14 +71,11 @@ class DriveClient:
             creds = cls._load_persistent_creds(persist_path)
             if creds is None:
                 raise RuntimeError("Failed to load persistent OAuth credentials.")
-
-        if not creds.valid:
-            if creds.refresh_token:
-                creds.refresh(Request())
+        if not creds.valid and creds.refresh_token:
+            creds.refresh(Request())
             persist_path.write_text(creds.to_json(), encoding="utf-8")
         return creds
 
-    # ───────────────────────── Factory ─────────────────────────
     @classmethod
     def from_env(
         cls,
@@ -105,7 +99,7 @@ class DriveClient:
 
         raise RuntimeError("No Google credentials provided. Set OAuth or Service Account envs.")
 
-    # ───────────────────────── Public API ─────────────────────────
+    # ── Public API ────────────────────────────────────────────────────────────
     def list_files_in_folder(self, folder_id: str, page_size: int = 100) -> List[Dict]:
         q = f"'{folder_id}' in parents and trashed = false"
         fields = "nextPageToken, files(id, name, mimeType, modifiedTime, size)"
@@ -151,8 +145,27 @@ class DriveClient:
             return self.export_file(fid, export_mime, dest_path)
         return self.download_file(fid, dest_path)
 
-    def upload_file(self, file_path: str, name: str, mime_type: str, parent_folder_id: str) -> str:
+    def ensure_in_folder(self, file_id: str, target_folder_id: str) -> None:
+        """Dosyanın gerçekten hedef klasörde olduğundan emin ol (addParents)."""
+        meta = self.service.files().get(fileId=file_id, fields="parents").execute()
+        parents = set(meta.get("parents", []) or [])
+        if target_folder_id not in parents:
+            # mevcut parent'lar korunarak hedef eklenir
+            self.service.files().update(
+                fileId=file_id,
+                addParents=target_folder_id,
+                fields="id, parents",
+            ).execute()
+
+    def upload_file(self, file_path: str, name: str, mime_type: str, parent_folder_id: str) -> dict:
         media = MediaFileUpload(file_path, mimetype=mime_type, resumable=True)
         body = {"name": name, "parents": [parent_folder_id]}
-        file = self.service.files().create(body=body, media_body=media, fields="id, webViewLink").execute()
-        return file["webViewLink"]
+        file = self.service.files().create(
+            body=body, media_body=media, fields="id, webViewLink, parents"
+        ).execute()
+        # Bazı durumlarda parents set edilemeyebiliyor; garantiye al
+        try:
+            self.ensure_in_folder(file["id"], parent_folder_id)
+        except Exception:
+            pass
+        return file  # {'id','webViewLink','parents'}

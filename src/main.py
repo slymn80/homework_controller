@@ -7,7 +7,7 @@ from datetime import datetime
 
 from .config import settings
 from .drive_client import DriveClient
-from .utils import read_file_to_text, normalize_download_filename
+from .utils import read_file_to_text, normalize_download_filename, parse_student_meta
 from .evaluator import evaluate_text
 from .reporter import create_report_excel
 
@@ -27,6 +27,9 @@ def is_allowed(name: str, mime_type: str) -> bool:
         return True
     ext = Path(name).suffix.lower()
     return (not settings.allowed_ext) or (ext in [e.strip().lower() for e in settings.allowed_ext])
+
+def word_count_of(text: str) -> int:
+    return len([w for w in (text or "").split() if w.strip()])
 
 def process_once(limit: int | None = None) -> dict:
     drive = DriveClient.from_env(
@@ -65,7 +68,7 @@ def process_once(limit: int | None = None) -> dict:
             continue
 
         try:
-            text = read_file_to_text(local_path, ocr_lang=settings.ocr_lang or "tur+eng", mime_type=mime)
+            text = read_file_to_text(local_path, ocr_lang=settings.ocr_lang or "rus+kaz+tur+eng", mime_type=mime)
         except Exception as e:
             stats["skipped"].append({"name": fname, "reason": f"extract error: {e}"})
             continue
@@ -82,10 +85,18 @@ def process_once(limit: int | None = None) -> dict:
             stats["skipped"].append({"name": fname, "reason": f"evaluate error: {e}"})
             continue
 
+        # Öğrenci meta (heuristik)
+        first_name, last_name, cls, student_full = parse_student_meta(norm_name)
+
         bd = res.get("breakdown") or {}
         processed_rows.append({
-            "filename": Path(local_path).name,
-            "mime": mime,
+            "first_name": first_name,
+            "last_name": last_name,
+            "class": cls,
+            "student": student_full,
+            "file_name": Path(local_path).name,
+            "file_id": fid,
+            "word_count": word_count_of(text),
             "total": res.get("total"),
             "content": bd.get("content"),
             "structure": bd.get("structure"),
@@ -95,25 +106,41 @@ def process_once(limit: int | None = None) -> dict:
         })
 
     if not processed_rows:
-        return {"rows": 0, "local_report": None, "drive_report_link": None, "stats": stats}
+        return {"rows": 0, "local_report": None, "drive_report_link": None, "backup_report_link": None, "stats": stats}
 
     today = datetime.now().strftime("%Y-%m-%d")
     report_name = f"{settings.report_prefix}_{today}.xlsx"
     report_path = str(out_dir / report_name)
     create_report_excel(report_path, processed_rows)
 
-    mime_type = mimetypes.guess_type(report_path)[0] or "application/octet-stream"
-    uploaded_link = drive.upload_file(
+    mime_type = mimetypes.guess_type(report_path)[0] or "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    # Ana klasöre yükle
+    uploaded = drive.upload_file(
         file_path=report_path,
         name=os.path.basename(report_path),
         mime_type=mime_type,
         parent_folder_id=settings.drive_reports_folder_id,
     )
+    report_link = uploaded.get("webViewLink")
+    # Yedek klasöre de yükle (varsa)
+    backup_link = None
+    if settings.drive_backup_folder_id:
+        try:
+            backup_file = drive.upload_file(
+                file_path=report_path,
+                name=os.path.basename(report_path),
+                mime_type=mime_type,
+                parent_folder_id=settings.drive_backup_folder_id,
+            )
+            backup_link = backup_file.get("webViewLink")
+        except Exception as e:
+            print(f"⚠️ Backup upload failed: {e}")
 
     return {
         "rows": len(processed_rows),
         "local_report": report_path,
-        "drive_report_link": uploaded_link,
+        "drive_report_link": report_link,
+        "backup_report_link": backup_link,
         "stats": stats,
     }
 
