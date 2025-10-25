@@ -123,7 +123,7 @@ def process_once(limit: int | None = None) -> Dict[str, Any]:
         mime_type=mime_type,
         parent_folder_id=settings.drive_reports_folder_id,
     )
-    web_link = uploaded.get("webViewLink")
+    web_link = uploaded
 
     # Opsiyonel yedek kopya
     backup_link = None
