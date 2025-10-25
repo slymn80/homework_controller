@@ -15,6 +15,8 @@ from .utils import (
     uniquify_path,
 )
 
+import mimetypes
+
 
 def _select_files(files: List[dict], allowed_ext: list[str]) -> List[dict]:
     """Google Drive dosya listesini uzantıya göre filtrele."""
@@ -113,7 +115,13 @@ def process_once(limit: int | None = None) -> Dict[str, Any]:
     write_excel_report(rows, local_path)
 
     # Drive'a yükle (n8n tetikler)
-    uploaded = drive.upload_file(local_path, settings.drive_reports_folder_id)
+    mime_type = mimetypes.guess_type(local_path)[0] or "application/octet-stream"
+    uploaded = drive.upload_file(
+        file_path=local_path,
+        name=os.path.basename(local_path),
+        mime_type=mime_type,
+        parent_folder_id=settings.drive_reports_folder_id,
+    )
     web_link = uploaded.get("webViewLink")
 
     # Opsiyonel yedek kopya
