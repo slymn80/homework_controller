@@ -11,7 +11,13 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from pathlib import Path as _Path
 
-SCOPES = ["https://www.googleapis.com/auth/drive"]
+# src/drive_client.py (üst kısım)
+SCOPES = [
+    "https://www.googleapis.com/auth/drive.readonly",
+    "https://www.googleapis.com/auth/drive.metadata.readonly",
+    "https://www.googleapis.com/auth/drive.file",
+]
+
 
 class DriveClient:
     def __init__(self, service=None):
