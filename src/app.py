@@ -55,13 +55,13 @@ def health():
 
 @app.get("/diag")
 def diag():
-    """
-    Prod ortamında hızlı teşhis: gizli içerik dökmez.
-    """
     svc_path = Path(settings.service_account_json) if settings.service_account_json else None
     svc_exists = bool(svc_path and svc_path.exists())
-
     writable, werr = _check_writable(Path(settings.local_output_dir))
+
+    # yeni: kalıcı token konumu
+    _, persist_token = DriveClient._resolve_oauth_paths()
+    persist_exists = persist_token.exists()
 
     return {
         "openai_key_present": bool(settings.openai_api_key and settings.openai_api_key.startswith("sk-")),
@@ -75,8 +75,9 @@ def diag():
         "outputs_error": werr,
         "allowed_ext": settings.allowed_ext,
         "using_oauth": bool(settings.oauth_client_secret_json),
+        "oauth_persist_path": str(persist_token),
+        "oauth_persist_exists": persist_exists,
     }
-
 
 @app.get("/run")
 def run_get(limit: Optional[int] = Query(None, description="0 veya None = sınırsız")):
