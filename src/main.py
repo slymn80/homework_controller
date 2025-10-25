@@ -73,9 +73,11 @@ def process_once(limit: int | None = None) -> dict:
             stats["skipped"].append({"name": fname, "reason": f"extract error: {e}"})
             continue
 
-        if not text.strip():
-            stats["skipped"].append({"name": fname, "reason": "empty text after extract"})
+        clean_text = text.replace("\x0c", "").strip()
+        if not clean_text or len(clean_text.split()) < 3:
+            stats["skipped"].append({"name": fname, "reason": "empty or unreadable text"})
             continue
+        text = clean_text
         stats["extracted"] += 1
 
         try:
@@ -109,7 +111,13 @@ def process_once(limit: int | None = None) -> dict:
         return {"rows": 0, "local_report": None, "drive_report_link": None, "backup_report_link": None, "stats": stats}
 
     today = datetime.now().strftime("%Y-%m-%d")
-    report_name = f"{settings.report_prefix}_{today}.xlsx"
+    base_name = f"{settings.report_prefix}_{today}"
+    i = 1
+    report_path = Path(settings.local_output_dir or "outputs") / f"{base_name}.xlsx"
+    while report_path.exists():
+        i += 1
+        report_path = Path(settings.local_output_dir or "outputs") / f"{base_name}_{i}.xlsx"
+    report_name = report_path.name
     report_path = str(out_dir / report_name)
     create_report_excel(report_path, processed_rows)
 

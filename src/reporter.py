@@ -25,15 +25,17 @@ def create_report_excel(output_path: str, rows: List[Dict[str, Any]]) -> str:
     ws = wb.active
     ws.title = "Report"
 
+    # Başlık satırı
     ws.append(HEADERS)
     header_font = Font(bold=True, color="FFFFFF")
     header_fill = PatternFill("solid", fgColor="4F81BD")
+
     for col, _h in enumerate(HEADERS, 1):
         c = ws.cell(row=1, column=col)
         c.font = header_font
         c.fill = header_fill
         ws.column_dimensions[c.column_letter].width = 20
-    ws.column_dimensions["M"].width = 80  # feedback geniş
+    ws.column_dimensions["M"].width = 80  # feedback genişliği
 
     for r in rows:
         bd = r.get("breakdown") or {}
