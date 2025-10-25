@@ -1,16 +1,21 @@
-fastapi
-uvicorn
-openai>=1.6.0
-google-auth
-google-auth-oauthlib
-google-auth-httplib2
-google-api-python-client
-python-dotenv
-pytesseract
-Pillow
-openpyxl
-reportlab
-tqdm
+fastapi==0.115.0
+uvicorn==0.30.6
+python-dotenv==1.0.1
+openai==1.6.0
+pandas==2.2.3
+XlsxWriter==3.2.0
+google-api-python-client==2.146.0
+google-auth==2.35.0
+google-auth-oauthlib==1.2.1
+google-auth-httplib2==0.2.0
+pdfminer.six==20231228
+python-docx==1.1.2
+tqdm==4.66.5
+pydantic==2.9.2
 
+pytesseract==0.3.10
+Pillow==10.4.0
+pdf2image==1.17.0
+pypdf==5.0.1
 
 
