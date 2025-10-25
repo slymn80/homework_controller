@@ -1,0 +1,58 @@
+# Python genel
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Sanal ortam
+.venv/
+env/
+venv/
+
+# Sistem / IDE dosyaları
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Geçici dosyalar
+*.log
+*.tmp
+*.bak
+*.swp
+*.swo
+*.orig
+
+# Build / çıktı dizinleri
+dist/
+build/
+outputs/
+.tmp/
+*.egg-info/
+
+# Ortam değişkenleri
+.env
+.env.*
+
+# Kimlik / gizli veriler
+creds/service_account.json
+creds/oauth_client_secret.json
+creds/oauth_token.json
+
+# Excel veya geçici raporlar
+*.xlsx
+*.xls
+*.csv
+
+# PyInstaller / coverage / test çıktıları
+*.spec
+htmlcov/
+.coverage
+.cache/
+.tox/
+nosetests.xml
+coverage.xml
+*.cover
+
+# OS meta
+ehthumbs.db
+Icon?
