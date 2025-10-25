@@ -15,6 +15,7 @@ from .utils import (
     uniquify_path,
 )
 
+import os
 import mimetypes
 
 
