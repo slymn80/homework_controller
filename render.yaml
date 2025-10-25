@@ -4,35 +4,20 @@ services:
     env: docker
     plan: starter
     autoDeploy: true
-    # Dockerfile kökte
-    # OCR ve bağımlılıklar Docker içinde
     healthCheckPath: /health
+    disk:
+      name: outputs-disk
+      mountPath: /app/outputs
+      sizeGB: 1
     envVars:
       - key: OPENAI_API_KEY
-        sync: false              # Render Dashboard > Environment -> add secret
+        sync: false
       - key: GOOGLE_SERVICE_ACCOUNT_JSON
         value: creds/service_account.json
-      # OAuth kullanacaksan alternatifleri aktif et:
-      # - key: GOOGLE_OAUTH_CLIENT_SECRET_JSON
-      #   value: creds/oauth_client_secret.json
-      # - key: GOOGLE_OAUTH_TOKEN_JSON
-      #   value: creds/oauth_token.json
-
-      # OCR ayarları
       - key: ALLOWED_EXT
         value: .txt,.docx,.pdf,.jpg,.jpeg,.png
       - key: OCR_LANG
         value: tur+eng
-
-      # Drive klasörleri
-      - key: DRIVE_SOURCE_FOLDER_ID
-        sync: false
-      - key: DRIVE_REPORTS_FOLDER_ID
-        sync: false
-      - key: DRIVE_BACKUP_FOLDER_ID
-        sync: false
-
-      # Uygulama davranışları
       - key: LOCAL_OUTPUT_DIR
         value: outputs
       - key: REPORT_PREFIX
@@ -40,48 +25,9 @@ services:
       - key: MAX_FILES_PER_RUN
         value: "0"
 
-    disk:
-      name: outputs-disk
-      mountPath: /app/outputs
-      sizeGB: 1
-
-# ---- Seçenek A: Render Cron Job (önerilen) ----
-cronJobs:
-  - name: homework-controller-daily
-    schedule: "0 18 * * *"     # Her gün 18:00 (UTC) - Asia/Almaty için saati ayarla
-    command: "python -m src.main"
+  # 🚀 Cron Job yerine ek bir worker servisi kullan
+  - type: cron
+    name: homework-controller-daily
     env: docker
-
-# ---- Seçenek B: Worker (cron yerine, istersen) ----
-# workers:
-#   - type: worker
-#     name: homework-controller-worker
-#     env: docker
-#     plan: starter
-#     autoDeploy: true
-#     envVars:
-#       - key: OPENAI_API_KEY
-#         sync: false
-#       - key: GOOGLE_SERVICE_ACCOUNT_JSON
-#         value: creds/service_account.json
-#       - key: ALLOWED_EXT
-#         value: .txt,.docx,.pdf,.jpg,.jpeg,.png
-#       - key: OCR_LANG
-#         value: tur+eng
-#       - key: DRIVE_SOURCE_FOLDER_ID
-#         sync: false
-#       - key: DRIVE_REPORTS_FOLDER_ID
-#         sync: false
-#       - key: DRIVE_BACKUP_FOLDER_ID
-#         sync: false
-#       - key: LOCAL_OUTPUT_DIR
-#         value: outputs
-#       - key: REPORT_PREFIX
-#         value: grading-report
-#       - key: MAX_FILES_PER_RUN
-#         value: "0"
-#     disk:
-#       name: outputs-disk
-#       mountPath: /app/outputs
-#       sizeGB: 1
-#     startCommand: "python -m src.main && sleep 31536000"
+    schedule: "0 12 * * *"   # UTC 12 = Asia/Almaty 18:00
+    command: "python -m src.main"
