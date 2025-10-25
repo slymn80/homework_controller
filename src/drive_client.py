@@ -39,7 +39,7 @@ class DriveClient:
 
     # ── OAuth persist ─────────────────────────────────────────────────────────
     @staticmethod
-    def _resolve_oauth_paths() -> tuple[Path, Path]:
+    def _resolve_oauth_paths():
         seed = os.getenv("GOOGLE_OAUTH_TOKEN_JSON", "/etc/secrets/oauth_token.json")
         persist_rel = os.getenv("OAUTH_TOKEN_PERSIST_PATH", "outputs/oauth_token.json")
         persist_abs = Path("/app") / persist_rel
@@ -116,9 +116,32 @@ class DriveClient:
                 break
         return files
 
+    def find_by_name_in_folder(self, name: str, folder_id: str) -> List[Dict]:
+        q = f"name = '{name}' and '{folder_id}' in parents and trashed = false"
+        resp = self.service.files().list(q=q, spaces="drive", fields="files(id, name, parents)").execute()
+        return resp.get("files", [])
+
+    def unique_name_in_folder(self, base_name: str, folder_id: str) -> str:
+        """
+        base_name (örn: grading-report_2025-10-25.xlsx)
+        klasörde aynı isim varsa sonuna _1, _2 ... ekler.
+        """
+        if not self.find_by_name_in_folder(base_name, folder_id):
+            return base_name
+        stem = Path(base_name).stem
+        ext = Path(base_name).suffix
+        i = 1
+        while True:
+            candidate = f"{stem}_{i}{ext}"
+            if not self.find_by_name_in_folder(candidate, folder_id):
+                return candidate
+            i += 1
+
     def download_file(self, file_id: str, dest_path: str) -> str:
         request = self.service.files().get_media(fileId=file_id)
         fh = io.BytesIO()
+        downloader = MediaFileUpload  # just to keep import used (not necessary but harmless)
+        from googleapiclient.http import MediaIoBaseDownload
         downloader = MediaIoBaseDownload(fh, request)
         done = False
         while not done:
@@ -143,19 +166,18 @@ class DriveClient:
             if not dest_path.lower().endswith(ext):
                 dest_path = str(Path(dest_path).with_suffix(ext))
             return self.export_file(fid, export_mime, dest_path)
-        return self.download_file(fid, dest_path)
-
-    def ensure_in_folder(self, file_id: str, target_folder_id: str) -> None:
-        """Dosyanın gerçekten hedef klasörde olduğundan emin ol (addParents)."""
-        meta = self.service.files().get(fileId=file_id, fields="parents").execute()
-        parents = set(meta.get("parents", []) or [])
-        if target_folder_id not in parents:
-            # mevcut parent'lar korunarak hedef eklenir
-            self.service.files().update(
-                fileId=file_id,
-                addParents=target_folder_id,
-                fields="id, parents",
-            ).execute()
+        # normal dosya
+        from googleapiclient.http import MediaIoBaseDownload
+        request = self.service.files().get_media(fileId=fid)
+        fh = io.BytesIO()
+        downloader = MediaIoBaseDownload(fh, request)
+        done = False
+        while not done:
+            _, done = downloader.next_chunk()
+        p = Path(dest_path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(fh.getvalue())
+        return str(p)
 
     def upload_file(self, file_path: str, name: str, mime_type: str, parent_folder_id: str) -> dict:
         media = MediaFileUpload(file_path, mimetype=mime_type, resumable=True)
@@ -163,16 +185,13 @@ class DriveClient:
         file = self.service.files().create(
             body=body, media_body=media, fields="id, webViewLink, parents"
         ).execute()
-
-        # Dosyanın gerçekten doğru klasörde olduğundan emin ol
+        # hedef klasörde olduğundan emin ol (çoğu zaman gerekmez ama garantili olsun)
         try:
             self.service.files().update(
                 fileId=file["id"],
                 addParents=parent_folder_id,
                 fields="id, parents"
             ).execute()
-        except Exception as e:
-            print(f"⚠️ Folder assignment failed: {e}")
-
+        except Exception:
+            pass
         return file
-

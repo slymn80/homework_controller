@@ -61,36 +61,36 @@ def process_once(limit: int | None = None) -> dict:
         local_path = str(out_dir / norm_name)
 
         try:
-            local_path = drive.download_any(f, local_path)  # Google Docs export dahil
+            local_path = drive.download_any(f, local_path)
             stats["downloaded"] += 1
         except Exception as e:
             stats["skipped"].append({"name": fname, "reason": f"download error: {e}"})
             continue
 
         try:
-            text = read_file_to_text(local_path, ocr_lang=settings.ocr_lang or "rus+kaz+tur+eng", mime_type=mime)
+            text_raw = read_file_to_text(local_path, ocr_lang=settings.ocr_lang or "rus+kaz+tur+eng", mime_type=mime)
         except Exception as e:
             stats["skipped"].append({"name": fname, "reason": f"extract error: {e}"})
             continue
 
-        clean_text = text.replace("\x0c", "").strip()
+        # OCR metnini temizle; en az 3 kelime şartı
+        clean_text = (text_raw or "").replace("\x0c", " ").strip()
         if not clean_text or len(clean_text.split()) < 3:
             stats["skipped"].append({"name": fname, "reason": "empty or unreadable text"})
             continue
-        text = clean_text
         stats["extracted"] += 1
 
         try:
-            res = evaluate_text(settings.openai_api_key, text, Path(local_path).name)
+            res = evaluate_text(settings.openai_api_key, clean_text, Path(local_path).name)
             stats["evaluated"] += 1
         except Exception as e:
             stats["skipped"].append({"name": fname, "reason": f"evaluate error: {e}"})
             continue
 
-        # Öğrenci meta (heuristik)
+        # Öğrenci meta (dosya adından)
         first_name, last_name, cls, student_full = parse_student_meta(norm_name)
-
         bd = res.get("breakdown") or {}
+
         processed_rows.append({
             "first_name": first_name,
             "last_name": last_name,
@@ -98,57 +98,44 @@ def process_once(limit: int | None = None) -> dict:
             "student": student_full,
             "file_name": Path(local_path).name,
             "file_id": fid,
-            "word_count": word_count_of(text),
+            "word_count": word_count_of(clean_text),
             "total": res.get("total"),
             "content": bd.get("content"),
             "structure": bd.get("structure"),
             "language": bd.get("language"),
             "originality": bd.get("originality"),
             "feedback": res.get("feedback"),
+            "breakdown": bd,
         })
 
     if not processed_rows:
-        return {"rows": 0, "local_report": None, "drive_report_link": None, "backup_report_link": None, "stats": stats}
+        return {"rows": 0, "local_report": None, "drive_report_link": None, "stats": stats}
 
     today = datetime.now().strftime("%Y-%m-%d")
-    base_name = f"{settings.report_prefix}_{today}"
-    i = 1
-    report_path = Path(settings.local_output_dir or "outputs") / f"{base_name}.xlsx"
-    while report_path.exists():
-        i += 1
-        report_path = Path(settings.local_output_dir or "outputs") / f"{base_name}_{i}.xlsx"
-    report_name = report_path.name
-    report_path = str(out_dir / report_name)
-    create_report_excel(report_path, processed_rows)
+    base_name = f"{settings.report_prefix}_{today}.xlsx"
 
-    mime_type = mimetypes.guess_type(report_path)[0] or "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    # Ana klasöre yükle
+    # 🔸 Drive klasöründe benzersiz isim üret (_1, _2 ...)
+    unique_name = drive.unique_name_in_folder(base_name, settings.drive_reports_folder_id)
+
+    # Lokal dosya adı da benzersiz olsun (görsel adla eşleşsin)
+    report_path = out_dir / unique_name
+    create_report_excel(str(report_path), processed_rows)
+
+    mime_type = mimetypes.guess_type(str(report_path))[0] or \
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
     uploaded = drive.upload_file(
-        file_path=report_path,
-        name=os.path.basename(report_path),
+        file_path=str(report_path),
+        name=unique_name,
         mime_type=mime_type,
         parent_folder_id=settings.drive_reports_folder_id,
     )
     report_link = uploaded.get("webViewLink")
-    # Yedek klasöre de yükle (varsa)
-    backup_link = None
-    if settings.drive_backup_folder_id:
-        try:
-            backup_file = drive.upload_file(
-                file_path=report_path,
-                name=os.path.basename(report_path),
-                mime_type=mime_type,
-                parent_folder_id=settings.drive_backup_folder_id,
-            )
-            backup_link = backup_file.get("webViewLink")
-        except Exception as e:
-            print(f"⚠️ Backup upload failed: {e}")
 
     return {
         "rows": len(processed_rows),
-        "local_report": report_path,
+        "local_report": str(report_path),
         "drive_report_link": report_link,
-        "backup_report_link": backup_link,
         "stats": stats,
     }
 
