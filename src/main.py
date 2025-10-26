@@ -1,144 +1,233 @@
+# src/main.py
 from __future__ import annotations
+
 import os
-import mimetypes
-from pathlib import Path
-from tqdm import tqdm
+import json
+import traceback
 from datetime import datetime
+from pathlib import Path
+from typing import List, Dict, Any, Optional
 
 from .config import settings
 from .drive_client import DriveClient
-from .utils import read_file_to_text, normalize_download_filename, parse_student_meta
 from .evaluator import evaluate_text
+from .utils import read_file_to_text, normalize_download_filename
 from .reporter import create_report_excel
 
-ALLOWED_MIMES = {
-    "text/plain",
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    "application/pdf",
-    "image/jpeg",
-    "image/png",
-    "application/vnd.google-apps.document",
-    "application/vnd.google-apps.spreadsheet",
-    "application/vnd.google-apps.presentation",
-}
+# İsteğe bağlı modüller (varsa kullan, yoksa sessiz geç)
+try:
+    from .meta_extractor import extract_student_meta  # yeni yardımcı
+except Exception:  # pragma: no cover
+    extract_student_meta = None  # type: ignore
 
-def is_allowed(name: str, mime_type: str) -> bool:
-    if mime_type in ALLOWED_MIMES or mime_type.startswith("image/"):
-        return True
+try:
+    from .similarity_checker import find_similar  # opsiyonel
+except Exception:  # pragma: no cover
+    find_similar = None  # type: ignore
+
+
+def _ensure_outputs_dir() -> Path:
+    outdir = Path(settings.local_output_dir or "outputs")
+    outdir.mkdir(parents=True, exist_ok=True)
+    return outdir
+
+
+def _unique_report_path(base_dir: Path, prefix: str = None) -> Path:
+    """
+    grading-report_YYYY-MM-DD.xlsx,
+    aynı gün ikinci kez üretimde grading-report_YYYY-MM-DD_1.xlsx, _2.xlsx...
+    """
+    date_str = datetime.utcnow().strftime("%Y-%m-%d")
+    pre = prefix or (settings.report_prefix or "grading-report")
+    base_name = f"{pre}_{date_str}.xlsx"
+    p = base_dir / base_name
+    if not p.exists():
+        return p
+    # sırayı arttır
+    k = 1
+    while True:
+        cand = base_dir / f"{pre}_{date_str}_{k}.xlsx"
+        if not cand.exists():
+            return cand
+        k += 1
+
+
+def _is_allowed(name: str) -> bool:
     ext = Path(name).suffix.lower()
-    return (not settings.allowed_ext) or (ext in [e.strip().lower() for e in settings.allowed_ext])
+    allowed = [e.strip().lower() for e in (settings.allowed_ext or []) if e.strip()]
+    return (not allowed) or (ext in allowed)
 
-def word_count_of(text: str) -> int:
-    return len([w for w in (text or "").split() if w.strip()])
 
-def process_once(limit: int | None = None) -> dict:
-    drive = DriveClient.from_env(
-        service_account_json=settings.service_account_json,
-        oauth_client_secret_json=settings.oauth_client_secret_json,
-        oauth_token_json=settings.oauth_token_json,
-    )
+def _word_count(text: str) -> int:
+    return len((text or "").split())
 
-    files = drive.list_files_in_folder(settings.drive_source_folder_id)
-    stats = {"found": len(files), "allowed": 0, "downloaded": 0, "extracted": 0, "evaluated": 0, "skipped": []}
-    if limit:
-        files = files[:limit]
 
-    processed_rows = []
-    out_dir = Path(settings.local_output_dir or "outputs")
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    for f in tqdm(files, desc="Processing files"):
-        fid = f["id"]
-        fname = f["name"]
+def _download_candidates(
+    drive: DriveClient, source_folder_id: str, limit: Optional[int]
+) -> List[Dict[str, Any]]:
+    """Kaynak klasördeki dosyaları listele."""
+    files: List[Dict[str, Any]] = drive.list_files(source_folder_id)
+    # filtrele uzantıya göre
+    files = [f for f in files if _is_allowed(f.get("name", ""))]
+    # normalize isim
+    for f in files:
+        name = f.get("name", "")
         mime = f.get("mimeType", "")
+        f["normalized_name"] = normalize_download_filename(name, mime)
+    # limitle
+    if limit is not None and limit > 0:
+        files = files[:limit]
+    return files
 
-        if not is_allowed(fname, mime):
-            stats["skipped"].append({"name": fname, "reason": f"not allowed ({mime})"})
-            continue
-        stats["allowed"] += 1
 
-        norm_name = normalize_download_filename(fname, mime)
-        local_path = str(out_dir / norm_name)
+def process_once(limit: Optional[int] = None) -> Dict[str, Any]:
+    """
+    Ana işleyici: indir → metin çıkar → değerlendir → rapor yaz → Drive'a yükle.
+    """
+    outdir = _ensure_outputs_dir()
 
-        try:
-            local_path = drive.download_any(f, local_path)
-            stats["downloaded"] += 1
-        except Exception as e:
-            stats["skipped"].append({"name": fname, "reason": f"download error: {e}"})
-            continue
-
-        try:
-            text_raw = read_file_to_text(local_path, ocr_lang=settings.ocr_lang or "rus+kaz+tur+eng", mime_type=mime)
-        except Exception as e:
-            stats["skipped"].append({"name": fname, "reason": f"extract error: {e}"})
-            continue
-
-        # OCR metnini temizle; en az 3 kelime şartı
-        clean_text = (text_raw or "").replace("\x0c", " ").strip()
-        if not clean_text or len(clean_text.split()) < 3:
-            stats["skipped"].append({"name": fname, "reason": "empty or unreadable text"})
-            continue
-        stats["extracted"] += 1
-
-        try:
-            res = evaluate_text(settings.openai_api_key, clean_text, Path(local_path).name)
-            stats["evaluated"] += 1
-        except Exception as e:
-            stats["skipped"].append({"name": fname, "reason": f"evaluate error: {e}"})
-            continue
-
-        # Öğrenci meta (dosya adından)
-        first_name, last_name, cls, student_full = parse_student_meta(norm_name, clean_text)
-        bd = res.get("breakdown") or {}
-
-        processed_rows.append({
-            "first_name": first_name,
-            "last_name": last_name,
-            "class": cls,
-            "student": student_full,
-            "file_name": Path(local_path).name,
-            "file_id": fid,
-            "word_count": word_count_of(clean_text),
-            "total": res.get("total"),
-            "content": bd.get("content"),
-            "structure": bd.get("structure"),
-            "language": bd.get("language"),
-            "originality": bd.get("originality"),
-            "feedback": res.get("feedback"),
-            "breakdown": bd,
-        })
-
-    if not processed_rows:
-        return {"rows": 0, "local_report": None, "drive_report_link": None, "stats": stats}
-
-    today = datetime.now().strftime("%Y-%m-%d")
-    base_name = f"{settings.report_prefix}_{today}.xlsx"
-
-    # 🔸 Drive klasöründe benzersiz isim üret (_1, _2 ...)
-    unique_name = drive.unique_name_in_folder(base_name, settings.drive_reports_folder_id)
-
-    # Lokal dosya adı da benzersiz olsun (görsel adla eşleşsin)
-    report_path = out_dir / unique_name
-    create_report_excel(str(report_path), processed_rows)
-
-    mime_type = mimetypes.guess_type(str(report_path))[0] or \
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-
-    uploaded = drive.upload_file(
-        file_path=str(report_path),
-        name=unique_name,
-        mime_type=mime_type,
-        parent_folder_id=settings.drive_reports_folder_id,
+    # Drive istemcisi (OAuth token’lı)
+    drive = DriveClient.from_env(
+        # OAuth akışını kullanıyoruz (service account değil)
+        use_service_account=False
     )
-    report_link = uploaded.get("webViewLink")
+
+    stats = {"found": 0, "allowed": 0, "downloaded": 0, "extracted": 0, "evaluated": 0}
+    skipped: List[Dict[str, str]] = []
+    processed_rows: List[Dict[str, Any]] = []
+
+    # İşlenecek dosyalar
+    files = _download_candidates(drive, settings.drive_source_folder_id, limit)
+    stats["found"] = len(files)
+    stats["allowed"] = len(files)
+
+    for f in files:
+        file_id = f["id"]
+        fname = f["normalized_name"]
+        try:
+            # 1) indir
+            local_path = Path(outdir) / fname
+            drive.download_file(file_id, str(local_path))
+            stats["downloaded"] += 1
+
+            # 2) metni çıkar (OCR dilini ayarlardan al)
+            text = read_file_to_text(
+                str(local_path),
+                ocr_lang=(settings.ocr_lang or "tur+eng+rus+kaz"),
+                mime_type=f.get("mimeType", ""),
+            )
+            if not text:
+                skipped.append({"name": fname, "reason": "empty text (extract failed)"})
+                continue
+            stats["extracted"] += 1
+
+            # 3) değerlendir
+            result = evaluate_text(settings.openai_api_key, text, fname)
+            # tolerans: total yoksa 0 yap
+            total = int(result.get("total") or 0)
+            b = result.get("breakdown") or {}
+            content = int(b.get("content") or 0)
+            structure = int(b.get("structure") or 0)
+            language = int(b.get("language") or 0)
+            originality = int(b.get("originality") or 0)
+            feedback = result.get("feedback") or json.dumps(result, ensure_ascii=False)
+
+            # 4) öğrenci meta (dosya adından; yoksa metinden)
+            first_name = last_name = clazz = student_full = ""
+            if extract_student_meta:
+                first_name, last_name, clazz, student_full = extract_student_meta(
+                    fname, text
+                )
+
+            # 5) rapor satırı
+            row = {
+                "first_name": first_name,
+                "last_name": last_name,
+                "class": clazz,
+                "student": student_full,
+                "file_name": fname,
+                "file_id": file_id,
+                "word_count": _word_count(text),
+                "total": total,
+                "content": content,
+                "structure": structure,
+                "language": language,
+                "originality": originality,
+                "feedback": feedback,
+                # rapor dışında faydalı olabilecek ham veri
+                "text": text,
+            }
+            processed_rows.append(row)
+            stats["evaluated"] += 1
+
+        except Exception as e:  # tek dosya hatası tüm akışı durdurmasın
+            skipped.append(
+                {"name": fname, "reason": f"{type(e).__name__}: {str(e)}"}
+            )
+
+    # Hiç satır yoksa rapor oluşturma
+    drive_link = None
+    local_report = None
+    if processed_rows:
+        report_path = _unique_report_path(outdir, settings.report_prefix or "grading-report")
+        create_report_excel(str(report_path), processed_rows)
+        local_report = str(report_path)
+
+        # Drive'a yükle (raporlar klasörü zorunlu)
+        if settings.drive_reports_folder_id:
+            uploaded = drive.upload_file(
+                local_path=str(report_path),
+                name=os.path.basename(str(report_path)),
+                mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                parent_folder_id=settings.drive_reports_folder_id,
+            )
+            # upload_file string döndürüyorsa link üret
+            if isinstance(uploaded, dict):
+                drive_link = uploaded.get("webViewLink") or uploaded.get("webViewURL")
+            else:
+                # sadece ID döndüyse linki kendimiz kurmaya çalışalım
+                drive_link = drive.build_file_link(str(uploaded))
+
+    # İsteğe bağlı: kopya/benzerlik analizi (modül varsa)
+    plagiarism_pairs = []
+    if find_similar and processed_rows:
+        # sadece gerekli alanları geçir (metin uzun ise çok yer kaplamasın)
+        lite = [
+            {
+                "file_name": r.get("file_name"),
+                "file_id": r.get("file_id"),
+                "student": r.get("student"),
+                "text": r.get("text", "")[:6000],  # sınırla (performans)
+            }
+            for r in processed_rows
+        ]
+        try:
+            plagiarism_pairs = find_similar(lite, threshold=80.0)
+        except Exception:
+            plagiarism_pairs = []
 
     return {
-        "rows": len(processed_rows),
-        "local_report": str(report_path),
-        "drive_report_link": report_link,
-        "stats": stats,
+        "status": "done",
+        "report": {
+            "rows": len(processed_rows),
+            "local_report": local_report,
+            "drive_report_link": drive_link,
+            "stats": {**stats, "skipped": skipped},
+        },
+        # opsiyonel bilgi (UI'de görmek istersen)
+        "plagiarism_pairs": plagiarism_pairs,
     }
 
+
 if __name__ == "__main__":
-    info = process_once(limit=settings.max_files_per_run or None)
-    print("✅ Done:", info)
+    # Lokal çalıştırma: .env okunur, limit ENV veya argümanla verilebilir.
+    try:
+        lim = settings.max_files_per_run or None
+        info = process_once(limit=lim)
+        print(json.dumps(info, ensure_ascii=False, indent=2))
+    except Exception as e:
+        print(json.dumps({
+            "error": str(e),
+            "trace": traceback.format_exc()
+        }, ensure_ascii=False))
+        raise
