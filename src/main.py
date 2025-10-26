@@ -69,7 +69,7 @@ def _download_candidates(drive: DriveClient, folder_id: str, limit: Optional[int
 
 def process_once(limit: Optional[int] = None) -> Dict[str, Any]:
     outdir = _ensure_outputs_dir()
-    drive = DriveClient.from_env(use_service_account=False)
+    drive = DriveClient.from_env()
 
     stats = {"found": 0, "evaluated": 0, "skipped": []}
     processed_rows: List[Dict[str, Any]] = []
