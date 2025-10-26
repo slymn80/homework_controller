@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 import os
 import mimetypes
@@ -11,8 +10,12 @@ from .drive_client import DriveClient
 from .utils import read_file_to_text, normalize_download_filename, parse_student_meta
 from .evaluator import evaluate_text
 from .reporter import create_report_excel
+from .reporter_plagiarism import create_plagiarism_excel  # 🔹 eklendi
 
-
+try:
+    from .similarity_checker import find_similar
+except Exception:
+    find_similar = None
 
 
 ALLOWED_MIMES = {
@@ -26,14 +29,17 @@ ALLOWED_MIMES = {
     "application/vnd.google-apps.presentation",
 }
 
+
 def is_allowed(name: str, mime_type: str) -> bool:
     if mime_type in ALLOWED_MIMES or mime_type.startswith("image/"):
         return True
     ext = Path(name).suffix.lower()
     return (not settings.allowed_ext) or (ext in [e.strip().lower() for e in settings.allowed_ext])
 
+
 def word_count_of(text: str) -> int:
     return len([w for w in (text or "").split() if w.strip()])
+
 
 def process_once(limit: int | None = None) -> dict:
     drive = DriveClient.from_env(
@@ -77,7 +83,6 @@ def process_once(limit: int | None = None) -> dict:
             stats["skipped"].append({"name": fname, "reason": f"extract error: {e}"})
             continue
 
-        # OCR metnini temizle; en az 3 kelime şartı
         clean_text = (text_raw or "").replace("\x0c", " ").strip()
         if not clean_text or len(clean_text.split()) < 3:
             stats["skipped"].append({"name": fname, "reason": "empty or unreadable text"})
@@ -91,8 +96,14 @@ def process_once(limit: int | None = None) -> dict:
             stats["skipped"].append({"name": fname, "reason": f"evaluate error: {e}"})
             continue
 
-        # Öğrenci meta (dosya adından)
+        # 🧠 Ad-soyad-sınıf bilgisi: dosya adında yoksa metinden bulmaya çalış
         first_name, last_name, cls, student_full = parse_student_meta(norm_name, clean_text)
+        if not student_full and clean_text:
+            import re
+            m = re.search(r"(?i)\b([A-ZÇĞİÖŞÜ][a-zçğıöşü]+)\s+([A-ZÇĞİÖŞÜ][a-zçğıöşü]+)\b", clean_text[:200])
+            if m:
+                first_name, last_name = m.group(1), m.group(2)
+                student_full = f"{first_name} {last_name}"
 
         bd = res.get("breakdown") or {}
 
@@ -111,6 +122,7 @@ def process_once(limit: int | None = None) -> dict:
             "originality": bd.get("originality"),
             "feedback": res.get("feedback"),
             "breakdown": bd,
+            "text": clean_text,
         })
 
     if not processed_rows:
@@ -118,11 +130,8 @@ def process_once(limit: int | None = None) -> dict:
 
     today = datetime.now().strftime("%Y-%m-%d")
     base_name = f"{settings.report_prefix}_{today}.xlsx"
-
-    # 🔸 Drive klasöründe benzersiz isim üret (_1, _2 ...)
     unique_name = drive.unique_name_in_folder(base_name, settings.drive_reports_folder_id)
 
-    # Lokal dosya adı da benzersiz olsun (görsel adla eşleşsin)
     report_path = out_dir / unique_name
     create_report_excel(str(report_path), processed_rows)
 
@@ -137,12 +146,42 @@ def process_once(limit: int | None = None) -> dict:
     )
     report_link = uploaded.get("webViewLink")
 
+    # 🔍 Kopya (plagiarism) kontrolü
+    plag_link = None
+    if find_similar:
+        lite = [
+            {
+                "file_name": r["file_name"],
+                "student": r["student"],
+                "text": r["text"][:6000],
+            }
+            for r in processed_rows
+        ]
+        try:
+            pairs = find_similar(lite, threshold=80.0)
+            if pairs:
+                plag_name = drive.unique_name_in_folder(f"plagiarism_{today}.xlsx", settings.drive_reports_folder_id)
+                plag_path = out_dir / plag_name
+                create_plagiarism_excel(str(plag_path), pairs)
+
+                up2 = drive.upload_file(
+                    file_path=str(plag_path),
+                    name=plag_name,
+                    mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    parent_folder_id=settings.drive_reports_folder_id,
+                )
+                plag_link = up2.get("webViewLink")
+        except Exception as e:
+            print(f"[warn] plagiarism check failed: {e}")
+
     return {
         "rows": len(processed_rows),
         "local_report": str(report_path),
         "drive_report_link": report_link,
+        "plagiarism_drive_link": plag_link,
         "stats": stats,
     }
+
 
 if __name__ == "__main__":
     info = process_once(limit=settings.max_files_per_run or None)
